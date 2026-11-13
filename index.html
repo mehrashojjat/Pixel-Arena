@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PeerJS Phone Joystick Test</title>
+<script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#101218;color:white;font:15px system-ui,sans-serif}#game{position:fixed;inset:0}#pixel{position:absolute;width:18px;height:18px;background:#ff3c46;left:50%;top:50%;transform:translate(-50%,-50%);box-shadow:0 0 18px #ff3c4680}#qrPanel{position:absolute;right:20px;top:20px;background:white;color:#161616;padding:12px;border-radius:12px;text-align:center;max-width:210px}#qr{width:180px;height:180px}#qr img,#qr canvas{display:block;max-width:100%}#qrLabel{font-size:12px;margin-top:8px;font-weight:600}#status{position:absolute;top:20px;left:20px;color:#bfc5d1;max-width:55%;line-height:1.5}#controller{display:none;position:fixed;inset:0;touch-action:none;user-select:none;-webkit-user-select:none}#controllerHeader{position:absolute;top:30px;left:0;right:0;text-align:center;color:#cbd0d8}#base{width:min(72vw,310px);height:min(72vw,310px);border:3px solid #5d6576;border-radius:50%;background:#252a35;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);touch-action:none}#knob{width:34%;height:34%;border-radius:50%;background:#ff3c46;box-shadow:0 0 24px #ff3c4660;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);pointer-events:none}#hint{position:absolute;bottom:35px;text-align:center;width:100%;color:#9098a7;font-size:13px}#error{color:#ff9b9b}
+</style>
+</head>
+<body>
+<div id="game"><div id="pixel"></div><div id="status">Connecting to PeerJS…</div><div id="qrPanel"><div id="qr"></div><div id="qrLabel">Scan to control</div></div></div>
+<div id="controller"><div id="controllerHeader">Connecting to screen…</div><div id="base"><div id="knob"></div></div><div id="hint">Drag the red joystick to move the pixel</div></div>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const hostId = params.get('controller');
+  const isController = !!hostId;
+  const status = document.getElementById('status');
+  const pixel = document.getElementById('pixel');
+  const game = document.getElementById('game');
+  const controller = document.getElementById('controller');
+  const controllerHeader = document.getElementById('controllerHeader');
+  const base = document.getElementById('base');
+  const knob = document.getElementById('knob');
+  if (isController) { game.style.display = 'none'; controller.style.display = 'block'; }
+  if (!window.Peer) {
+    (isController ? controllerHeader : status).textContent = 'PeerJS failed to load. Check your internet connection.';
+    return;
+  }
+  const peer = new Peer();
+  peer.on('error', err => {
+    (isController ? controllerHeader : status).textContent = 'Connection error: ' + err.message;
+  });
+  if (!isController) {
+    const controllers = new Map();
+    let x = window.innerWidth / 2, y = window.innerHeight / 2;
+    peer.on('open', id => {
+      const url = new URL(location.href);
+      url.search = '';
+      url.searchParams.set('controller', id);
+      url.hash = '';
+      const target = document.getElementById('qr');
+      if (window.QRCode) {
+        new QRCode(target, {text:url.href,width:180,height:180,correctLevel:QRCode.CorrectLevel.M});
+      } else {
+        target.textContent = 'QR library unavailable';
+      }
+      status.textContent = 'Ready · 0 controllers connected';
+    });
+    peer.on('connection', conn => {
+      conn.on('open', () => {
+        controllers.set(conn.peer, {x:0,y:0});
+        status.textContent = `Ready · ${controllers.size} controller(s) connected`;
+      });
+      conn.on('data', data => {
+        if (data && data.type === 'move' && controllers.has(conn.peer)) {
+          const vx = Number(data.x), vy = Number(data.y);
+          if (Number.isFinite(vx) && Number.isFinite(vy)) {
+            controllers.set(conn.peer, {x:Math.max(-1,Math.min(1,vx)),y:Math.max(-1,Math.min(1,vy))});
+          }
+        }
+      });
+      const remove = () => {
+        controllers.delete(conn.peer);
+        status.textContent = `Ready · ${controllers.size} controller(s) connected`;
+      };
+      conn.on('close',remove); conn.on('error',remove);
+    });
+    let last = performance.now();
+    function animate(now) {
+      const dt = Math.min((now-last)/1000,0.05); last=now;
+      let dx=0,dy=0;
+      for (const v of controllers.values()) { dx+=v.x;dy+=v.y; }
+      const magnitude=Math.hypot(dx,dy);
+      if (magnitude>1) {dx/=magnitude;dy/=magnitude;}
+      x=Math.max(9,Math.min(innerWidth-9,x+dx*280*dt));
+      y=Math.max(9,Math.min(innerHeight-9,y+dy*280*dt));
+      pixel.style.left=x+'px';pixel.style.top=y+'px';
+      requestAnimationFrame(animate);
+    }
+    requestAnimationFrame(animate);
+  } else {
+    let conn=null, vector={x:0,y:0}, activePointer=null;
+    peer.on('open', () => {
+      conn=peer.connect(hostId,{reliable:false});
+      conn.on('open',()=>{controllerHeader.textContent='Connected · Move the joystick'; send();});
+      conn.on('close',()=>{controllerHeader.textContent='Disconnected · Reload to reconnect';});
+      conn.on('error',err=>{controllerHeader.textContent='Connection error: '+err.message;});
+    });
+    function send() { if (conn && conn.open) conn.send({type:'move',x:vector.x,y:vector.y}); }
+    function update(e) {
+      const r=base.getBoundingClientRect(), cx=r.left+r.width/2, cy=r.top+r.height/2;
+      const radius=r.width*0.34;
+      let dx=(e.clientX-cx)/radius,dy=(e.clientY-cy)/radius;
+      const m=Math.hypot(dx,dy);
+      if(m>1){dx/=m;dy/=m;}
+      vector={x:dx,y:dy};
+      knob.style.left=(50+dx*34)+'%';knob.style.top=(50+dy*34)+'%';
+      send();
+    }
+    base.addEventListener('pointerdown',e=>{
+      if(activePointer!==null)return;
+      activePointer=e.pointerId;base.setPointerCapture(e.pointerId);update(e);
+    });
+    base.addEventListener('pointermove',e=>{if(e.pointerId===activePointer)update(e);});
+    function release(e){
+      if(e.pointerId!==activePointer)return;
+      activePointer=null;vector={x:0,y:0};knob.style.left='50%';knob.style.top='50%';send();
+    }
+    base.addEventListener('pointerup',release);
+    base.addEventListener('pointercancel',release);
+    window.addEventListener('blur',()=>{vector={x:0,y:0};knob.style.left='50%';knob.style.top='50%';send();});
+    setInterval(()=>{if(vector.x||vector.y)send();},50);
+  }
+})();
+</script>
+</body>
+</html>
